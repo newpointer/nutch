@@ -5,9 +5,9 @@
  * The ASF licenses this file to You under the Apache License, Version 2.0
  * (the "License"); you may not use this file except in compliance with
  * the License.  You may obtain a copy of the License at
- * 
+ *
  *     http://www.apache.org/licenses/LICENSE-2.0
- * 
+ *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
  * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
@@ -22,7 +22,9 @@ import java.util.ArrayList;
 import java.util.List;
 
 import org.apache.avro.util.Utf8;
+import org.apache.commons.lang.exception.ExceptionUtils;
 import org.apache.gora.mapreduce.GoraReducer;
+import org.apache.gora.store.DataStore;
 import org.apache.hadoop.conf.Configuration;
 import org.apache.hadoop.io.Writable;
 import org.apache.hadoop.util.StringUtils;
@@ -32,6 +34,7 @@ import org.apache.nutch.scoring.ScoreDatum;
 import org.apache.nutch.scoring.ScoringFilterException;
 import org.apache.nutch.scoring.ScoringFilters;
 import org.apache.nutch.storage.Mark;
+import org.apache.nutch.storage.StorageUtils;
 import org.apache.nutch.storage.WebPage;
 import org.apache.nutch.util.TableUtil;
 import org.apache.nutch.util.WebPageWritable;
@@ -52,6 +55,8 @@ public class DbUpdateReducer extends
   private List<ScoreDatum> inlinkedScoreData = new ArrayList<ScoreDatum>();
   private int maxLinks;
 
+  private DataStore<String, WebPage> store;
+
   @Override
   protected void setup(Context context) throws IOException,
       InterruptedException {
@@ -62,6 +67,13 @@ public class DbUpdateReducer extends
     schedule = FetchScheduleFactory.getFetchSchedule(conf);
     scoringFilters = new ScoringFilters(conf);
     maxLinks = conf.getInt("db.update.max.inlinks", 10000);
+
+    try {
+      store = StorageUtils.createWebStore(conf, String.class, WebPage.class);
+    } catch (ClassNotFoundException e) {
+      LOG.error(e.toString());
+      LOG.error(ExceptionUtils.getFullStackTrace(e));
+    }
   }
 
   @Override
@@ -94,10 +106,15 @@ public class DbUpdateReducer extends
       return;
     }
 
-    if (page == null) { // new row
-      if (!additionsAllowed) {
-        return;
-      }
+    if (page == null && (page = store.get(TableUtil.reverseUrl(url))) != null) { // existing row
+      LOG.debug("Page already exists in data store, skipping inlinks for " + keyUrl);
+      // TODO: Find a better solution, but then we need to at least merge page.getInLinks() with inlinkedScoreData
+      return;
+      } else if (page == null) { // new row
+        if (!additionsAllowed) {
+          return;
+        }
+      LOG.debug("Page does not exist in data store, creating one for " + keyUrl);
       page = WebPage.newBuilder().build();
       schedule.initializeSchedule(url, page);
       page.setStatus((int) CrawlStatus.STATUS_UNFETCHED);
@@ -160,6 +177,7 @@ public class DbUpdateReducer extends
       }
     }
 
+    // TODO: Merge in stead of clearing, because we can't rely on the assumptions that all page.getInLinks() are present in inlinkedScoreData.
     if (page.getInlinks() != null) {
       page.getInlinks().clear();
     }
